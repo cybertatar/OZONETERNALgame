@@ -1,0 +1,92 @@
+# Собирает игру при каждом пуше и выкладывает в Releases:
+#   OZON-ETERNAL-mac.dmg      — открыть и перетащить в «Программы»
+#   OZON-ETERNAL-windows.zip  — внутри один .exe
+# Из main — релиз «latest», из других веток — пре-релиз «dev-<ветка>».
+name: Сборка
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GODOT_VERSION: "4.6"
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Godot и шаблоны экспорта (кэш)
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/godot
+            ~/Library/Application Support/Godot/export_templates
+          key: godot-${{ env.GODOT_VERSION }}-stable
+
+      - name: Скачать Godot
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/godot
+          cd ~/godot
+          curl -sSL -o godot.zip "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_macos.universal.zip"
+          unzip -q godot.zip && rm godot.zip
+          curl -sSL -o tpl.tpz "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
+          T="$HOME/Library/Application Support/Godot/export_templates/${GODOT_VERSION}.stable"
+          mkdir -p "$T"
+          unzip -q -j tpl.tpz templates/macos.zip templates/version.txt templates/windows_release_x86_64.exe templates/windows_release_x86_64_console.exe -d "$T"
+          rm tpl.tpz
+
+      - name: Экспорт
+        run: |
+          GODOT="$HOME/godot/Godot.app/Contents/MacOS/Godot"
+          mkdir -p build/mac build/windows
+          "$GODOT" --headless --path . --import || true
+          "$GODOT" --headless --path . --export-release "macOS" "build/mac/OZON ETERNAL.zip"
+          "$GODOT" --headless --path . --export-release "Windows" "build/windows/OZON ETERNAL.exe"
+          test -s "build/mac/OZON ETERNAL.zip"
+          test -s "build/windows/OZON ETERNAL.exe"
+
+      - name: Упаковать .dmg и .zip
+        run: |
+          cd build/mac && ditto -x -k "OZON ETERNAL.zip" . && cd ../..
+          tiffutil -cathidpicheck dist/dmg-background.png dist/dmg-background@2x.png -out dist/dmg-background.tiff
+          pip3 install --break-system-packages --quiet dmgbuild
+          dmgbuild -s dist/dmg_settings.py -D app="build/mac/OZON ETERNAL.app" -D background=dist/dmg-background.tiff "OZON ETERNAL" OZON-ETERNAL-mac.dmg
+          cd build/windows && zip -q -9 ../../OZON-ETERNAL-windows.zip "OZON ETERNAL.exe"
+
+      - name: Выложить в Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BRANCH="${GITHUB_REF_NAME}"
+          if [ "$BRANCH" = "main" ]; then
+            TAG=latest; FLAGS="--latest"; TITLE="OZON ETERNAL — последняя версия"
+          else
+            TAG="dev-$(echo "$BRANCH" | tr '/' '-')"; FLAGS="--prerelease"; TITLE="OZON ETERNAL — тестовая сборка ($BRANCH)"
+          fi
+          cat > notes.md <<EOF
+          ⚠️ **Преальфа.** Контента пока мало, игра будет пополняться.
+
+          Сборка из \`$BRANCH\`, коммит ${GITHUB_SHA::7}.
+
+          **Mac:** скачай \`OZON-ETERNAL-mac.dmg\`, открой и перетащи Озона в «Программы».
+          При первом запуске macOS скажет, что не может проверить разработчика (у игры нет
+          платной подписи Apple). Нажми «Готово», открой «Системные настройки → Конфиденциальность
+          и безопасность», пролистай вниз и нажми «Всё равно открыть». Дальше игра запускается как обычно.
+
+          **Windows:** скачай \`OZON-ETERNAL-windows.zip\`, распакуй и запусти \`OZON ETERNAL.exe\`.
+          Если Windows покажет синее окно SmartScreen — «Подробнее» → «Выполнить в любом случае».
+          EOF
+          gh release delete "$TAG" --cleanup-tag -y || true
+          gh release create "$TAG" OZON-ETERNAL-mac.dmg OZON-ETERNAL-windows.zip \
+            --target "$GITHUB_SHA" --title "$TITLE" --notes-file notes.md $FLAGS
